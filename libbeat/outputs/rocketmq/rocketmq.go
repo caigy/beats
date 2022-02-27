@@ -2,6 +2,8 @@ package rocketmq
 
 import (
 	"context"
+	"strings"
+	"time"
 
 	"github.com/elastic/beats/v7/libbeat/beat"
 	"github.com/elastic/beats/v7/libbeat/common"
@@ -20,10 +22,12 @@ type client struct {
 	observer    outputs.Observer
 	index       string
 	codec       codec.Codec
-	namesrvAddr string
+	namesrvAddr []string
 	topic       string
+	group       string
+	timeout     time.Duration
+	maxRetries  int
 
-	//mq       *RocketMq
 	producer rocketmq.Producer
 }
 
@@ -31,7 +35,7 @@ const (
 	logSelector = "rocketmq"
 )
 
-func init() { //初始化，把我们定义的 rocketmq struct 注册进来
+func init() {
 	outputs.RegisterType("rocketmq", makeRocketmq)
 }
 
@@ -56,28 +60,18 @@ func makeRocketmq(
 		return outputs.Fail(err)
 	}
 
-	//创建 rocketmq struct， 传入配置文件的 rocketmq host 和 topic 进行保存。
-	out := &client{log: log,
+	client := &client{log: log,
 		observer:    observer,
 		index:       index,
 		codec:       codec,
-		namesrvAddr: config.NamesrvAddr,
-		topic:       config.Topic}
+		namesrvAddr: config.Nameservers,
+		topic:       config.Topic,
+		group:       config.Group,
+		timeout:     config.SendTimeout,
+		maxRetries:  config.MaxRetries}
 
-	//arr := strings.Split(config.Host, ",") //针对 rocketmq 可能集群配置 xxx:9876,xxxx:9876
-	//rocketmq 的生产者开始注册，其中 group 写死了= logByFilebeat,重新
-	//out.mq = RegisterRocketProducerMust(arr, "logByFilebeat", 1)
-
-	// check stdout actually being available
-	// if runtime.GOOS != "windows" {
-	// 	if _, err = out.out.Stat(); err != nil {
-	// 		err = fmt.Errorf("rocketmq output initialization failed with: %v", err)
-	// 		return outputs.Fail(err)
-	// 	}
-	// }
-
-	//没有大小限制=-1，不尝试重试=0
-	return outputs.Success(-1, 0, out)
+	//retry in producer, so set it 0 in the following function
+	return outputs.Success(config.BatchSize, 0, client)
 }
 
 ///////////////// in client.go //////////////////////////
@@ -86,8 +80,10 @@ func (c *client) Connect() error {
 	c.log.Warnf("connect: %v", c.namesrvAddr)
 
 	p, err := rocketmq.NewProducer(
-		producer.WithNsResolver(primitive.NewPassthroughResolver([]string{"127.0.0.1:9876"})),
-		producer.WithRetry(2),
+		producer.WithNsResolver(primitive.NewPassthroughResolver(c.namesrvAddr)),
+		producer.WithRetry(c.maxRetries),
+		producer.WithSendMsgTimeout(c.timeout),
+		producer.WithGroupName(c.group),
 	)
 	if err != nil {
 		c.log.Errorf("RocketMQ creates producer fails with: %v", err)
@@ -171,15 +167,14 @@ func (c *client) publishEvent(event *publisher.Event) bool {
 	res, err := c.producer.SendSync(context.Background(), msg)
 
 	if err != nil {
-		c.log.Errorf("send to rocketmq  is error %+v", err)
+		c.log.Errorf("send to rocketmq  is error %v", err)
 		return false
 	} else {
-		c.log.Warn("send msg result=%v", res.String())
+		c.log.Warnf("send msg result=%v", res.String())
 	}
 	return true
 }
 
-//接口规范
 func (c *client) String() string {
-	return "rocketmq"
+	return "rocketmq[" + strings.Join(c.namesrvAddr, ",") + "]"
 }

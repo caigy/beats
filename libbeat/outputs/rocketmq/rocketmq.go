@@ -116,6 +116,7 @@ func (c *client) Close() error {
 func (c *client) Publish(_ context.Context, batch publisher.Batch) error {
 	c.log.Warn("Enter Publish()..........")
 
+	defer batch.ACK()
 	st := c.observer
 	events := batch.Events()
 	st.NewBatch(len(events))
@@ -130,9 +131,9 @@ func (c *client) Publish(_ context.Context, batch publisher.Batch) error {
 		}
 	}
 
-	batch.ACK()
-	st.Dropped(dropped)
-	st.Acked(len(events) - dropped)
+	// batch.ACK()
+	// st.Dropped(dropped)
+	// st.Acked(len(events) - dropped)
 
 	return nil
 }
@@ -142,6 +143,8 @@ func (c *client) publishEvent(event *publisher.Event) bool {
 
 	serializedEvent, err := c.codec.Encode(c.index, &event.Content)
 	if err != nil {
+		c.observer.Dropped(1)
+
 		if !event.Guaranteed() {
 			return false
 		}
@@ -164,14 +167,32 @@ func (c *client) publishEvent(event *publisher.Event) bool {
 		Body:  buf,
 	}
 
-	res, err := c.producer.SendSync(context.Background(), msg)
+	// res, err := c.producer.SendSync(context.Background(), msg)
+
+	// if err != nil {
+	// 	c.log.Errorf("send to rocketmq  is error %v", err)
+	// 	return false
+	// } else {
+	// 	c.log.Warnf("send msg result=%v", res.String())
+	// }
+
+	err = c.producer.SendAsync(context.Background(),
+		func(ctx context.Context, result *primitive.SendResult, e error) {
+			if e != nil {
+				c.observer.Dropped(1)
+				c.log.Errorf("send to rocketmq is error %v", e)
+			} else {
+				c.observer.Acked(1)
+				c.log.Warnf("send msg result=%v", result.String())
+			}
+		}, msg)
 
 	if err != nil {
-		c.log.Errorf("send to rocketmq  is error %v", err)
+		c.observer.Dropped(1)
+		c.log.Errorf("send to rocketmq is error %v", err)
 		return false
-	} else {
-		c.log.Warnf("send msg result=%v", res.String())
 	}
+
 	return true
 }
 
